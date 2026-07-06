@@ -39,11 +39,12 @@ def load_pdf(pdf_path):
             if text:
 
                 pages.append(
-                    {
-                        "document": pdf_path.name,
-                        "page": page_number,
-                        "text": text.strip()
-                    }
-                )
+    {
+        "document": pdf_path.name,
+        "page": page_number,
+        "text": text.strip(),
+        "source_id": f"{pdf_path.stem}_page_{page_number}"
+    }
+)
 
     return pages
