@@ -74,9 +74,11 @@ class VectorStore:
 
         results = []
 
-        for idx in indices[0]:
+        for score, idx in zip(scores[0], indices[0]):
 
             if idx != -1:
-                results.append(self.chunks[idx])
+                chunk = dict(self.chunks[idx])
+                chunk["score"] = float(score)
+                results.append(chunk)
 
         return results

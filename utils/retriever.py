@@ -8,7 +8,7 @@ Responsible for:
 
 from sentence_transformers import SentenceTransformer
 
-from config import EMBEDDING_MODEL, TOP_K
+from config import EMBEDDING_MODEL, MIN_RELEVANCE_SCORE, TOP_K
 
 # ==========================================================
 # Load Embedding Model (Loaded only once)
@@ -47,4 +47,8 @@ def retrieve(query, vector_store):
         top_k=TOP_K
     )
 
-    return results
+    return [
+        chunk
+        for chunk in results
+        if chunk.get("score", 0) >= MIN_RELEVANCE_SCORE
+    ]

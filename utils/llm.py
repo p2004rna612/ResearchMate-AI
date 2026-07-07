@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 import google.generativeai as genai
 
 from config import GEMINI_MODEL
+from utils.citation_utils import format_citation
 from utils.prompts import SYSTEM_PROMPT
 
 # ==========================================================
@@ -77,9 +78,7 @@ Page: {chunk['page']}
 """
         )
 
-        citations.append(
-            f"{chunk['document']} (Page {chunk['page']})"
-        )
+        citations.append(format_citation(chunk))
 
     context = "\n" + ("\n" + "=" * 60 + "\n").join(context)
 
@@ -116,6 +115,9 @@ ANSWER
             f"{str(e)}"
         )
 
-    citations = sorted(set(citations))
+    if "do not contain enough information" in answer.lower():
+        citations = []
+    else:
+        citations = sorted(set(citations))
 
     return answer, citations

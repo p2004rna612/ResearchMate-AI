@@ -28,6 +28,10 @@ EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 # Number of most relevant chunks retrieved from FAISS
 TOP_K = 5
 
+# Minimum cosine similarity score required for a chunk to be used.
+# This helps reject unrelated questions before sending context to the LLM.
+MIN_RELEVANCE_SCORE = 0.30
+
 # ==========================================================
 # Gemini Model Configuration
 # ==========================================================

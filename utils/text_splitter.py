@@ -58,15 +58,21 @@ def split_pages(pages):
             if not chunk.strip():
                 continue
 
-            chunks.append(
-                {
-                    "chunk_id": chunk_id,
-                    "document": page["document"],
-                    "page": page["page"],
-                    "source_id": page["source_id"],
-                    "text": chunk.strip()
-                }
-            )
+            chunk_data = {
+                "chunk_id": chunk_id,
+                "document": page["document"],
+                "page": page["page"],
+                "source_id": page["source_id"],
+                "text": chunk.strip()
+            }
+
+            if "source_label" in page:
+                chunk_data["source_label"] = page["source_label"]
+
+            if "source_url" in page:
+                chunk_data["source_url"] = page["source_url"]
+
+            chunks.append(chunk_data)
 
             chunk_id += 1
 

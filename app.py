@@ -2,7 +2,7 @@ import os
 import tempfile
 import streamlit as st
 
-from utils.pdf_loader import load_pdf
+from utils.document_loader import load_document
 from utils.text_splitter import split_pages
 from utils.embeddings import generate_embeddings
 from utils.vector_store import VectorStore
@@ -33,6 +33,12 @@ if "documents_processed" not in st.session_state:
 if "chunks" not in st.session_state:
     st.session_state.chunks = []
 
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
+if "current_response" not in st.session_state:
+    st.session_state.current_response = None
+
 # ==========================================================
 # SIDEBAR
 # ==========================================================
@@ -43,28 +49,61 @@ with st.sidebar:
 
     st.markdown("---")
 
-    st.markdown("### 🚀 Features")
+    st.markdown("### Chat History")
 
-    st.success("✅ Multi PDF Upload")
+    if st.session_state.chat_history:
 
-    st.success("✅ Semantic Search")
+        if st.button("Clear Chat History", use_container_width=True):
+            st.session_state.chat_history = []
+            st.session_state.current_response = None
+            st.rerun()
 
-    st.success("✅ Gemini 2.5 Flash")
+        for index, item in enumerate(
+            reversed(st.session_state.chat_history),
+            start=1
+        ):
 
-    st.success("✅ FAISS Vector Database")
+            with st.expander(f"Q{index}: {item['question']}"):
 
-    st.success("✅ Source Citations")
+                if item["found"]:
+                    st.markdown(item["answer"])
+                else:
+                    st.warning(item["answer"])
+
+                history_download = (
+                    f"Question:\n{item['question']}\n\n"
+                    f"Answer:\n{item['answer']}"
+                )
+
+                if item["citations"]:
+                    history_download += "\n\nSources:\n"
+                    history_download += "\n".join(
+                        f"- {citation}" for citation in item["citations"]
+                    )
+
+                st.download_button(
+                    label="Download",
+                    data=history_download,
+                    file_name=f"researchmate_answer_{index}.txt",
+                    mime="text/plain",
+                    use_container_width=True,
+                    key=f"sidebar_download_{index}_{item['question']}"
+                )
+
+    else:
+
+        st.info("No questions yet.")
 
     st.markdown("---")
 
     st.markdown("### 📖 How to Use")
 
     st.write("""
-1. Upload research papers.
+1. Upload documents.
 
 2. Click **Process Documents**.
 
-3. Ask any research question.
+3. Ask any question from the uploaded documents.
 
 4. View the AI-generated answer.
 
@@ -78,34 +117,34 @@ with st.sidebar:
 st.title("📚 ResearchMate AI")
 
 st.caption(
-    "AI-powered Research Assistant using Retrieval-Augmented Generation (RAG)"
+    "AI-powered Document Assistant using Retrieval-Augmented Generation (RAG)"
 )
 
 st.divider()
 
 # ==========================================================
-# PDF UPLOAD
+# DOCUMENT UPLOAD
 # ==========================================================
 
-st.subheader("📂 Upload Research Papers")
+st.subheader("📂 Upload Documents")
 
 uploaded_files = st.file_uploader(
-    "Select one or more PDF files",
-    type=["pdf"],
+    "Select one or more documents",
+    type=["pdf", "txt", "md", "markdown", "docx"],
     accept_multiple_files=True
 )
 
 if uploaded_files:
 
     st.success(
-        f"✅ {len(uploaded_files)} PDF(s) selected."
+        f"✅ {len(uploaded_files)} document(s) selected."
     )
 
     with st.expander("Uploaded Files"):
 
-        for pdf in uploaded_files:
+        for document in uploaded_files:
 
-            st.write("📄", pdf.name)
+            st.write("📄", document.name)
 
 st.divider()
 
@@ -123,14 +162,14 @@ process_button = st.button(
 if process_button:
 
     if not uploaded_files:
-        st.warning("⚠️ Please upload at least one PDF.")
+        st.warning("⚠️ Please upload at least one document.")
         st.stop()
 
     try:
         progress_bar = st.progress(0)
         status_text = st.empty()
 
-        status_text.text("📄 Reading PDF documents...")
+        status_text.text("📄 Reading uploaded documents...")
         progress_bar.progress(10)
 
         with st.spinner("📄 Reading uploaded documents..."):
@@ -139,18 +178,20 @@ if process_button:
 
             for uploaded_file in uploaded_files:
 
-                # Save uploaded PDF temporarily
+                extension = os.path.splitext(uploaded_file.name)[1]
+
+                # Save uploaded document temporarily
                 with tempfile.NamedTemporaryFile(
                     delete=False,
-                    suffix=".pdf"
+                    suffix=extension
                 ) as tmp_file:
 
                     tmp_file.write(uploaded_file.getbuffer())
 
                     temp_path = tmp_file.name
 
-                # Extract pages
-                pages = load_pdf(
+                # Extract text
+                pages = load_document(
                     temp_path,
                     document_name=uploaded_file.name
                 )
@@ -160,12 +201,23 @@ if process_button:
                 # Remove temporary file
                 os.remove(temp_path)
 
+            if not all_pages:
+                raise ValueError(
+                    "No readable text was found in the uploaded documents. "
+                    "Please upload text-based files instead of scanned images."
+                )
+
         status_text.text("🧩 Splitting documents into chunks...")
         progress_bar.progress(35)
 
         with st.spinner("🧩 Splitting documents into chunks..."):
 
             chunks = split_pages(all_pages)
+
+            if not chunks:
+                raise ValueError(
+                    "The uploaded documents were read, but no valid text chunks were created."
+                )
 
         status_text.text("🧠 Generating embeddings...")
         progress_bar.progress(60)
@@ -189,6 +241,8 @@ if process_button:
         st.session_state.vector_store = vector_store
         st.session_state.documents_processed = True
         st.session_state.chunks = chunks
+        st.session_state.chat_history = []
+        st.session_state.current_response = None
         progress_bar.progress(100)
         status_text.text("✅ Processing completed successfully!")
         st.balloons()
@@ -203,7 +257,7 @@ if process_button:
 
         with col1:
             st.metric(
-                "PDFs",
+                "Documents",
                 len(uploaded_files)
             )
 
@@ -235,7 +289,7 @@ if st.session_state.documents_processed:
 
     st.success("✅ Documents processed successfully. You can now ask questions.")
 
-    st.subheader("❓ Ask a Research Question")
+    st.subheader("❓ Ask a Document Question")
 
     question = st.text_input(
         "Enter your question",
@@ -273,8 +327,21 @@ if st.session_state.documents_processed:
 
                 st.subheader("💬 AI Answer")
 
-# Show a warning if the answer is not found
-            if "do not contain enough information" in answer.lower():
+            answer_not_found = "do not contain enough information" in answer.lower()
+
+            history_item = {
+                "question": question.strip(),
+                "answer": answer,
+                "citations": citations,
+                "found": not answer_not_found,
+                "retrieved_chunks": retrieved_chunks,
+            }
+
+            st.session_state.chat_history.append(history_item)
+            st.session_state.current_response = history_item
+
+            # Show a warning if the answer is not found
+            if answer_not_found:
                 st.warning(answer)
             else:
                 st.markdown(answer)
@@ -283,36 +350,57 @@ if st.session_state.documents_processed:
 
                 st.subheader("📚 Sources")
 
+                if citations:
+
+                    for citation in citations:
+                        st.markdown(f"- {citation}")
+
+                else:
+
+                    st.info("No citations available.")
+
+            download_text = f"Question:\n{question.strip()}\n\nAnswer:\n{answer}"
+
             if citations:
+                download_text += "\n\nSources:\n"
+                download_text += "\n".join(f"- {citation}" for citation in citations)
 
-                for citation in citations:
-                    st.markdown(f"- {citation}")
+            st.download_button(
+                label="Download Answer",
+                data=download_text,
+                file_name="researchmate_answer.txt",
+                mime="text/plain",
+                use_container_width=True
+            )
 
-            else:
+            if not answer_not_found:
 
-                st.info("No citations available.")
+                st.divider()
 
-            st.divider()
+                with st.expander("🔎 Retrieved Chunks (Debug View)", expanded=True):
 
-            with st.expander("🔎 Retrieved Chunks (Debug View)"):
+                    for i, chunk in enumerate(retrieved_chunks, start=1):
 
-                for i, chunk in enumerate(retrieved_chunks, start=1):
+                        st.markdown(
+                            f"### Result {i}"
+                        )
 
-                    st.markdown(
-                        f"### Result {i}"
-                    )
+                        st.markdown(
+                            f"**Document:** {chunk['document']}"
+                        )
 
-                    st.markdown(
-                        f"**Document:** {chunk['document']}"
-                    )
+                        st.markdown(
+                            f"**Page:** {chunk['page']}"
+                        )
 
-                    st.markdown(
-                        f"**Page:** {chunk['page']}"
-                    )
+                        if "score" in chunk:
+                            st.caption(
+                                f"Relevance score: {chunk['score']:.2f}"
+                            )
 
-                    st.write(chunk["text"])
+                        st.write(chunk["text"])
 
-                    st.markdown("---")
+                        st.markdown("---")
 
         except Exception as e:
 

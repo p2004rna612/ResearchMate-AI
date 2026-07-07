@@ -10,6 +10,8 @@ Responsible for:
 from pathlib import Path
 import pdfplumber
 
+from utils.citation_utils import infer_research_link
+
 
 def load_pdf(pdf_path, document_name=None):
     """
@@ -43,6 +45,8 @@ def load_pdf(pdf_path, document_name=None):
 
     with pdfplumber.open(pdf_path) as pdf:
 
+        extracted_pages = []
+
         for page_number, page in enumerate(pdf.pages, start=1):
 
             text = page.extract_text()
@@ -51,7 +55,7 @@ def load_pdf(pdf_path, document_name=None):
             if not text or not text.strip():
                 continue
 
-            pages.append(
+            extracted_pages.append(
                 {
                     "document": document_name if document_name else pdf_path.name,
                     "page": page_number,
@@ -62,5 +66,14 @@ def load_pdf(pdf_path, document_name=None):
                     ),
                 }
             )
+
+    name = document_name if document_name else pdf_path.name
+    link_text = "\n".join(page["text"] for page in extracted_pages[:2])
+    research_link = infer_research_link(link_text, name)
+
+    for page in extracted_pages:
+        page["source_label"] = research_link["label"]
+        page["source_url"] = research_link["url"]
+        pages.append(page)
 
     return pages
