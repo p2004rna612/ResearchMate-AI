@@ -127,6 +127,11 @@ if process_button:
         st.stop()
 
     try:
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+
+        status_text.text("📄 Reading PDF documents...")
+        progress_bar.progress(10)
 
         with st.spinner("📄 Reading uploaded documents..."):
 
@@ -155,13 +160,22 @@ if process_button:
                 # Remove temporary file
                 os.remove(temp_path)
 
+        status_text.text("🧩 Splitting documents into chunks...")
+        progress_bar.progress(35)
+
         with st.spinner("🧩 Splitting documents into chunks..."):
 
             chunks = split_pages(all_pages)
 
+        status_text.text("🧠 Generating embeddings...")
+        progress_bar.progress(60)
+
         with st.spinner("🧠 Generating embeddings..."):
 
             chunks = generate_embeddings(chunks)
+
+        status_text.text("📚 Building FAISS vector database...")
+        progress_bar.progress(85)
 
         with st.spinner("📚 Building FAISS vector database..."):
 
@@ -175,6 +189,8 @@ if process_button:
         st.session_state.vector_store = vector_store
         st.session_state.documents_processed = True
         st.session_state.chunks = chunks
+        progress_bar.progress(100)
+        status_text.text("✅ Processing completed successfully!")
         st.balloons()
         st.success("✅ Documents processed successfully!")
         
