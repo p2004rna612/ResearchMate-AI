@@ -2,15 +2,20 @@
 text_splitter.py
 
 Responsible for:
-- Splitting extracted PDF pages into chunks
-- Preserving metadata for citations
+- Splitting extracted PDF pages into smaller chunks
+- Preserving metadata required for retrieval and citations
 """
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+
 from config import CHUNK_SIZE, CHUNK_OVERLAP
 
 
 def get_text_splitter():
+    """
+    Create and return the RecursiveCharacterTextSplitter.
+    """
+
     return RecursiveCharacterTextSplitter(
         chunk_size=CHUNK_SIZE,
         chunk_overlap=CHUNK_OVERLAP,
@@ -26,13 +31,15 @@ def get_text_splitter():
 
 def split_pages(pages):
     """
-    Split extracted PDF pages into chunks.
+    Split extracted PDF pages into text chunks.
 
     Args:
-        pages: List of dictionaries returned by pdf_loader
+        pages (list):
+            Output from load_pdf()
 
     Returns:
-        List of chunk dictionaries.
+        list:
+            List of chunk dictionaries.
     """
 
     splitter = get_text_splitter()
@@ -47,13 +54,17 @@ def split_pages(pages):
 
         for chunk in text_chunks:
 
+            # Skip empty chunks
+            if not chunk.strip():
+                continue
+
             chunks.append(
                 {
                     "chunk_id": chunk_id,
                     "document": page["document"],
                     "page": page["page"],
                     "source_id": page["source_id"],
-                    "text": chunk
+                    "text": chunk.strip()
                 }
             )
 

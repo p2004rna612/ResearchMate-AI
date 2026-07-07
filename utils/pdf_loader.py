@@ -4,24 +4,35 @@ pdf_loader.py
 Responsible for:
 - Reading PDF files
 - Extracting text page by page
-- Preserving document name and page numbers
+- Preserving document metadata
 """
 
 from pathlib import Path
 import pdfplumber
 
 
-def load_pdf(pdf_path):
+def load_pdf(pdf_path, document_name=None):
     """
-    Load a PDF and return structured page data.
+    Load a PDF and extract text from each page.
+
+    Args:
+        pdf_path (str | Path):
+            Path to the PDF.
+
+        document_name (str, optional):
+            Original filename. Used when uploaded through Streamlit.
 
     Returns:
-        list of dictionaries:
+        list[dict]
+
+        Example:
+
         [
             {
-                "document": "sample.pdf",
+                "document": "bert.pdf",
                 "page": 1,
-                "text": "..."
+                "text": "...",
+                "source_id": "bert_page_1"
             }
         ]
     """
@@ -36,15 +47,20 @@ def load_pdf(pdf_path):
 
             text = page.extract_text()
 
-            if text:
+            # Skip empty pages
+            if not text or not text.strip():
+                continue
 
-                pages.append(
-    {
-        "document": pdf_path.name,
-        "page": page_number,
-        "text": text.strip(),
-        "source_id": f"{pdf_path.stem}_page_{page_number}"
-    }
-)
+            pages.append(
+                {
+                    "document": document_name if document_name else pdf_path.name,
+                    "page": page_number,
+                    "text": text.strip(),
+                    "source_id": (
+                        f"{Path(document_name).stem if document_name else pdf_path.stem}"
+                        f"_page_{page_number}"
+                    ),
+                }
+            )
 
     return pages
