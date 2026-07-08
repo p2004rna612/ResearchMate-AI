@@ -12,7 +12,7 @@ import os
 from dotenv import load_dotenv
 import google.generativeai as genai
 
-from config import GEMINI_MODEL
+import config
 from utils.citation_utils import format_citation
 from utils.prompts import SYSTEM_PROMPT
 
@@ -35,20 +35,44 @@ genai.configure(api_key=api_key)
 # Gemini Model
 # ==========================================================
 
-model = genai.GenerativeModel(GEMINI_MODEL)
+model = genai.GenerativeModel(config.GEMINI_MODEL)
+
+
+def _trim_context_text(text, max_chars=None):
+    text = (text or "").strip()
+
+    max_chars = max_chars or getattr(config, "MAX_CONTEXT_CHARS_PER_CHUNK", 900)
+
+    if len(text) <= max_chars:
+        return text
+
+    return text[:max_chars].rsplit(" ", 1)[0].strip()
 
 
 # ==========================================================
-# Generate Answer
+# Generate Research Response
 # ==========================================================
 
-def generate_answer(question, retrieved_chunks):
+def generate_answer(
+    request,
+    retrieved_chunks,
+    task_label="Question Answering",
+    task_instruction=None,
+    max_output_tokens=None,
+    max_context_chars=None,
+    stream_callback=None,
+):
     """
-    Generate an answer using Gemini.
+    Generate a research-assistance response using Gemini.
 
     Args:
-        question (str)
+        request (str)
         retrieved_chunks (list)
+        task_label (str)
+        task_instruction (str | None)
+        max_output_tokens (int | None)
+        max_context_chars (int | None)
+        stream_callback (callable | None)
 
     Returns:
         tuple:
@@ -59,7 +83,7 @@ def generate_answer(question, retrieved_chunks):
     if not retrieved_chunks:
 
         return (
-            "The uploaded documents do not contain enough information to answer this question.",
+            "The uploaded documents do not contain enough information to answer this request.",
             []
         )
 
@@ -74,7 +98,7 @@ def generate_answer(question, retrieved_chunks):
 Document: {chunk['document']}
 Page: {chunk['page']}
 
-{chunk['text']}
+{_trim_context_text(chunk['text'], max_chars=max_context_chars)}
 """
         )
 
@@ -86,27 +110,75 @@ Page: {chunk['page']}
 {SYSTEM_PROMPT}
 
 ========================
+RESEARCH TASK
+========================
+
+Task type: {task_label}
+
+Task instructions:
+{task_instruction or "Answer the user's request using only the supplied document context."}
+
+========================
 DOCUMENT CONTEXT
 ========================
 
 {context}
 
 ========================
-QUESTION
+USER REQUEST
 ========================
 
-{question}
+{request}
 
 ========================
-ANSWER
+RESEARCH ASSISTANCE RESPONSE
 ========================
 """
 
     try:
 
-        response = model.generate_content(prompt)
+        generation_config = {
+            "temperature": getattr(config, "GEMINI_TEMPERATURE", 0.2),
+            "max_output_tokens": max_output_tokens or getattr(
+                config,
+                "GEMINI_MAX_OUTPUT_TOKENS",
+                900
+            ),
+        }
 
-        answer = response.text.strip()
+        if stream_callback:
+            response = model.generate_content(
+                prompt,
+                generation_config=generation_config,
+                request_options={
+                    "timeout": getattr(config, "GEMINI_REQUEST_TIMEOUT_SECONDS", 12)
+                },
+                stream=True,
+            )
+
+            answer_parts = []
+
+            for chunk in response:
+                text = getattr(chunk, "text", "")
+
+                if not text:
+                    continue
+
+                answer_parts.append(text)
+                stream_callback("".join(answer_parts))
+
+            answer = "".join(answer_parts).strip()
+
+        else:
+            response = model.generate_content(
+                prompt,
+                generation_config=generation_config,
+                request_options={
+                    "timeout": getattr(config, "GEMINI_REQUEST_TIMEOUT_SECONDS", 12)
+                },
+            )
+
+            answer = response.text.strip()
 
     except Exception as e:
 

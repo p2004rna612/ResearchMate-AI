@@ -1,8 +1,13 @@
 import os
 import tempfile
+import queue
+import threading
 import streamlit as st
 
+import config
+from utils.citation_utils import format_citation
 from utils.document_loader import load_document
+from utils.metadata_extractor import extract_document_metadata
 from utils.text_splitter import split_pages
 from utils.embeddings import generate_embeddings
 from utils.vector_store import VectorStore
@@ -33,11 +38,343 @@ if "documents_processed" not in st.session_state:
 if "chunks" not in st.session_state:
     st.session_state.chunks = []
 
+if "document_metadata" not in st.session_state:
+    st.session_state.document_metadata = []
+
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
 if "current_response" not in st.session_state:
     st.session_state.current_response = None
+
+
+def render_metadata_panel(metadata_items):
+    if not metadata_items:
+        return
+
+    st.subheader("Paper Information")
+
+    for metadata in metadata_items:
+        with st.container(border=True):
+            title = metadata.get("title", "Not found")
+            document = metadata.get("document", "Uploaded document")
+
+            st.markdown(f"#### {title}")
+            st.caption(document)
+
+            col1, col2, col3 = st.columns(3)
+
+            with col1:
+                st.markdown("**Authors**")
+                st.write(metadata.get("authors", "Not found"))
+                st.markdown("**Year**")
+                st.write(metadata.get("year", "Not found"))
+
+            with col2:
+                st.markdown("**DOI**")
+                doi = metadata.get("doi", "Not found")
+                if doi != "Not found":
+                    st.markdown(f"[{doi}](https://doi.org/{doi})")
+                else:
+                    st.write(doi)
+
+                st.markdown("**Conference / Journal**")
+                st.write(metadata.get("venue", "Not found"))
+
+            with col3:
+                st.markdown("**Keywords**")
+                st.write(metadata.get("keywords", "Not found"))
+
+            st.markdown("**Abstract**")
+            st.write(metadata.get("abstract", "Not found"))
+
+
+def generate_follow_up_questions():
+    return [
+        "Explain this in simple terms.",
+        "Compare this with another method.",
+        "What are the limitations?",
+        "Give practical applications.",
+    ]
+
+
+RESEARCH_TASKS = {
+    "Answer a question": {
+        "placeholder": "Example: What is BERT?",
+        "button": "Ask ResearchMate AI",
+        "default_request": "",
+        "uses_broad_context": False,
+        "instruction": (
+            "Answer the user's question directly. Use concise academic language "
+            "and include only information supported by the document context."
+        ),
+    },
+    "Explain a difficult concept": {
+        "placeholder": "Example: Explain self-attention in simple terms.",
+        "button": "Explain Concept",
+        "default_request": "",
+        "uses_broad_context": False,
+        "instruction": (
+            "Explain the concept clearly in simple terms, then add the technical "
+            "meaning and why it matters in the paper."
+        ),
+    },
+    "Summarize papers": {
+        "placeholder": "Optional: focus the summary on methods, findings, or contributions.",
+        "button": "Summarize Papers",
+        "default_request": "Summarize the uploaded paper or papers.",
+        "uses_broad_context": True,
+        "instruction": (
+            "Summarize the uploaded paper or papers with sections for purpose, "
+            "methodology, key contributions, findings, and conclusion."
+        ),
+    },
+    "Compare papers": {
+        "placeholder": "Optional: compare by method, dataset, results, or limitations.",
+        "button": "Compare Papers",
+        "default_request": "Compare the uploaded papers.",
+        "uses_broad_context": True,
+        "max_chunks": 6,
+        "per_document": 2,
+        "max_context_chars": 650,
+        "max_output_tokens": 380,
+        "instruction": (
+            "Create a concise comparison. Use short sections for problem, method, "
+            "strengths, limitations, and key difference. Keep it under 8 bullets."
+        ),
+    },
+    "Generate literature review": {
+        "placeholder": "Optional: describe the topic or angle for the literature review.",
+        "button": "Generate Literature Review",
+        "default_request": "Generate a literature review from the uploaded papers.",
+        "uses_broad_context": True,
+        "instruction": (
+            "Write a concise literature review that synthesizes the uploaded papers, "
+            "groups related ideas, highlights trends, and explains how the papers connect."
+        ),
+    },
+    "Identify research gaps": {
+        "placeholder": "Optional: focus on methods, datasets, evaluation, or applications.",
+        "button": "Identify Research Gaps",
+        "default_request": "Identify research gaps from the uploaded papers.",
+        "uses_broad_context": True,
+        "instruction": (
+            "Identify research gaps, unresolved limitations, missing evaluations, "
+            "and possible future research directions supported by the document context."
+        ),
+    },
+}
+
+
+def select_broad_context_chunks(
+    chunks,
+    max_chunks=None,
+    per_document=None
+):
+    max_chunks = max_chunks or getattr(config, "BROAD_CONTEXT_MAX_CHUNKS", 10)
+    per_document = per_document or getattr(
+        config,
+        "BROAD_CONTEXT_CHUNKS_PER_DOCUMENT",
+        3
+    )
+
+    selected = []
+    counts_by_document = {}
+
+    for chunk in chunks:
+        document = chunk.get("document", "document")
+        current_count = counts_by_document.get(document, 0)
+
+        if current_count >= per_document:
+            continue
+
+        selected.append(chunk)
+        counts_by_document[document] = current_count + 1
+
+        if len(selected) >= max_chunks:
+            break
+
+    return selected
+
+
+def trim_chunks_for_task(chunks, max_context_chars=None):
+    if not max_context_chars:
+        return chunks
+
+    trimmed_chunks = []
+
+    for chunk in chunks:
+        trimmed_chunk = dict(chunk)
+        text = (trimmed_chunk.get("text") or "").strip()
+
+        if len(text) > max_context_chars:
+            text = text[:max_context_chars].rsplit(" ", 1)[0].strip()
+
+        trimmed_chunk["text"] = text
+        trimmed_chunks.append(trimmed_chunk)
+
+    return trimmed_chunks
+
+
+def generate_research_response(
+    request_text,
+    retrieved_chunks,
+    selected_task,
+    task_config,
+    stream_callback=None
+):
+    fast_chunks = trim_chunks_for_task(
+        retrieved_chunks,
+        max_context_chars=task_config.get("max_context_chars")
+    )
+
+    try:
+        return generate_answer(
+            request_text,
+            fast_chunks,
+            task_label=selected_task,
+            task_instruction=task_config["instruction"],
+            max_output_tokens=task_config.get("max_output_tokens"),
+            max_context_chars=task_config.get("max_context_chars"),
+            stream_callback=stream_callback,
+        )
+    except TypeError as exc:
+        if "unexpected keyword argument" not in str(exc):
+            raise
+
+        return generate_answer(
+            request_text,
+            fast_chunks,
+            task_label=selected_task,
+            task_instruction=task_config["instruction"],
+        )
+
+
+def generate_local_fallback_response(request_text, retrieved_chunks, selected_task):
+    if not retrieved_chunks:
+        return (
+            "The uploaded documents do not contain enough information to answer this request.",
+            []
+        )
+
+    citations = sorted({format_citation(chunk) for chunk in retrieved_chunks})
+
+    if selected_task == "Compare papers":
+        grouped_chunks = {}
+
+        for chunk in retrieved_chunks:
+            grouped_chunks.setdefault(chunk["document"], []).append(chunk)
+
+        lines = [
+            "Gemini is taking too long, so here is a quick comparison from the retrieved document text.",
+            "",
+        ]
+
+        for document, chunks in grouped_chunks.items():
+            excerpt = chunks[0]["text"].strip()
+            excerpt = excerpt[:450].rsplit(" ", 1)[0].strip()
+            lines.append(f"**{document}**")
+            lines.append(f"- Main retrieved idea: {excerpt}")
+            lines.append("")
+
+        lines.append("Use the retrieved chunks below for more detail, or ask a narrower comparison question.")
+
+        return "\n".join(lines), citations
+
+    lines = [
+        "Gemini is taking too long, so here is a quick document-based response from the most relevant retrieved passages.",
+        "",
+    ]
+
+    for index, chunk in enumerate(retrieved_chunks[:3], start=1):
+        excerpt = chunk["text"].strip()
+        excerpt = excerpt[:600].rsplit(" ", 1)[0].strip()
+        lines.append(
+            f"{index}. From **{chunk['document']}**, page {chunk['page']}: {excerpt}"
+        )
+
+    lines.append("")
+    lines.append("Try asking a shorter or more specific question for a faster Gemini answer.")
+
+    return "\n".join(lines), citations
+
+
+def generate_research_response_with_timeout(
+    request_text,
+    retrieved_chunks,
+    selected_task,
+    task_config
+):
+    timeout_seconds = getattr(config, "GEMINI_REQUEST_TIMEOUT_SECONDS", 12)
+    result_queue = queue.Queue(maxsize=1)
+
+    def run_gemini_request():
+        try:
+            result_queue.put(
+                (
+                    "ok",
+                    generate_research_response(
+                        request_text,
+                        retrieved_chunks,
+                        selected_task,
+                        task_config,
+                        None
+                    ),
+                )
+            )
+        except Exception as exc:
+            result_queue.put(("error", exc))
+
+    worker = threading.Thread(target=run_gemini_request, daemon=True)
+    worker.start()
+
+    try:
+        status, payload = result_queue.get(timeout=timeout_seconds)
+    except queue.Empty:
+        return generate_local_fallback_response(
+            request_text,
+            trim_chunks_for_task(
+                retrieved_chunks,
+                max_context_chars=task_config.get("max_context_chars")
+            ),
+            selected_task
+        )
+
+    if status == "error":
+        return generate_local_fallback_response(
+            request_text,
+            trim_chunks_for_task(
+                retrieved_chunks,
+                max_context_chars=task_config.get("max_context_chars")
+            ),
+            selected_task
+        )
+
+    answer, citations = payload
+
+    if answer.startswith("An error occurred while generating the answer."):
+        return generate_local_fallback_response(
+            request_text,
+            trim_chunks_for_task(
+                retrieved_chunks,
+                max_context_chars=task_config.get("max_context_chars")
+            ),
+            selected_task
+        )
+
+    return answer, citations
+
+
+def render_follow_up_questions(questions):
+    if not questions:
+        return
+
+    st.divider()
+    st.subheader("Suggested Follow-up Questions")
+
+    with st.container(border=True):
+        for follow_up in questions:
+            st.markdown(f"- {follow_up}")
 
 # ==========================================================
 # SIDEBAR
@@ -63,22 +400,35 @@ with st.sidebar:
             start=1
         ):
 
-            with st.expander(f"Q{index}: {item['question']}"):
+            task_label = item.get("task", "Answer a question")
+
+            with st.expander(f"{task_label} {index}: {item['question']}"):
 
                 if item["found"]:
                     st.markdown(item["answer"])
+                    render_follow_up_questions(
+                        item.get("follow_up_questions", [])
+                    )
                 else:
                     st.warning(item["answer"])
 
                 history_download = (
-                    f"Question:\n{item['question']}\n\n"
-                    f"Answer:\n{item['answer']}"
+                    f"Task:\n{task_label}\n\n"
+                    f"Request:\n{item['question']}\n\n"
+                    f"Response:\n{item['answer']}"
                 )
 
                 if item["citations"]:
                     history_download += "\n\nSources:\n"
                     history_download += "\n".join(
                         f"- {citation}" for citation in item["citations"]
+                    )
+
+                if item.get("follow_up_questions"):
+                    history_download += "\n\nSuggested Follow-up Questions:\n"
+                    history_download += "\n".join(
+                        f"- {follow_up}"
+                        for follow_up in item["follow_up_questions"]
                     )
 
                 st.download_button(
@@ -175,6 +525,7 @@ if process_button:
         with st.spinner("📄 Reading uploaded documents..."):
 
             all_pages = []
+            document_metadata = []
 
             for uploaded_file in uploaded_files:
 
@@ -197,6 +548,14 @@ if process_button:
                 )
 
                 all_pages.extend(pages)
+
+                if pages:
+                    document_metadata.append(
+                        extract_document_metadata(
+                            pages,
+                            uploaded_file.name
+                        )
+                    )
 
                 # Remove temporary file
                 os.remove(temp_path)
@@ -241,6 +600,7 @@ if process_button:
         st.session_state.vector_store = vector_store
         st.session_state.documents_processed = True
         st.session_state.chunks = chunks
+        st.session_state.document_metadata = document_metadata
         st.session_state.chat_history = []
         st.session_state.current_response = None
         progress_bar.progress(100)
@@ -273,6 +633,8 @@ if process_button:
                 len(chunks)
             )
 
+        render_metadata_panel(st.session_state.document_metadata)
+
     except Exception as e:
 
         st.error("❌ Error while processing documents.")
@@ -282,73 +644,104 @@ if process_button:
 st.divider()
 
 # ==========================================================
-# ASK QUESTIONS
+# RESEARCH ASSISTANCE
 # ==========================================================
 
 if st.session_state.documents_processed:
 
-    st.success("✅ Documents processed successfully. You can now ask questions.")
+    st.success("Documents processed successfully. You can now use research assistance.")
 
-    st.subheader("❓ Ask a Document Question")
+    st.subheader("Research Assistance")
 
-    question = st.text_input(
-        "Enter your question",
-        placeholder="Example: What is BERT?"
+    render_metadata_panel(st.session_state.document_metadata)
+
+    selected_task = st.selectbox(
+        "Choose a research task",
+        options=list(RESEARCH_TASKS.keys())
     )
 
+    task_config = RESEARCH_TASKS[selected_task]
+
+    question = st.text_area(
+        "Enter your request",
+        placeholder=task_config["placeholder"],
+        height=100
+    )
+
+    request_text = question.strip() or task_config["default_request"]
+
     ask_button = st.button(
-        "🤖 Ask ResearchMate AI",
+        task_config["button"],
         use_container_width=True
     )
 
     if ask_button:
 
-        if question.strip() == "":
-            st.warning("⚠️ Please enter a question.")
+        if not request_text:
+            st.warning("Please enter a research request.")
             st.stop()
 
         try:
 
-            with st.spinner("🔍 Searching relevant document chunks..."):
+            with st.spinner("Preparing relevant document context..."):
 
-                retrieved_chunks = retrieve(
-                    question,
-                    st.session_state.vector_store
-                )
+                if task_config["uses_broad_context"]:
+                    retrieved_chunks = select_broad_context_chunks(
+                        st.session_state.chunks,
+                        max_chunks=task_config.get("max_chunks"),
+                        per_document=task_config.get("per_document")
+                    )
+                else:
+                    retrieved_chunks = retrieve(
+                        request_text,
+                        st.session_state.vector_store
+                    )
 
-            with st.spinner("🤖 Gemini is generating an answer..."):
-
-                answer, citations = generate_answer(
-                question,
-                retrieved_chunks
+            st.divider()
+            st.subheader("ResearchMate Response")
+            response_placeholder = st.empty()
+            response_placeholder.info(
+                "Trying Gemini. If it is slow, ResearchMate will show a quick document-based response."
             )
 
-                st.divider()
+            with st.spinner("Generating response..."):
 
-                st.subheader("💬 AI Answer")
+                answer, citations = generate_research_response_with_timeout(
+                    request_text,
+                    retrieved_chunks,
+                    selected_task,
+                    task_config
+                )
 
             answer_not_found = "do not contain enough information" in answer.lower()
+            follow_up_questions = (
+                []
+                if answer_not_found
+                else generate_follow_up_questions()
+            )
 
             history_item = {
-                "question": question.strip(),
+                "task": selected_task,
+                "question": request_text,
                 "answer": answer,
                 "citations": citations,
                 "found": not answer_not_found,
                 "retrieved_chunks": retrieved_chunks,
+                "follow_up_questions": follow_up_questions,
             }
 
             st.session_state.chat_history.append(history_item)
             st.session_state.current_response = history_item
 
-            # Show a warning if the answer is not found
             if answer_not_found:
+                response_placeholder.empty()
                 st.warning(answer)
             else:
-                st.markdown(answer)
+                response_placeholder.markdown(answer)
 
                 st.divider()
 
-                st.subheader("📚 Sources")
+                st.subheader("Sources")
 
                 if citations:
 
@@ -359,16 +752,29 @@ if st.session_state.documents_processed:
 
                     st.info("No citations available.")
 
-            download_text = f"Question:\n{question.strip()}\n\nAnswer:\n{answer}"
+                render_follow_up_questions(follow_up_questions)
+
+            download_text = (
+                f"Task:\n{selected_task}\n\n"
+                f"Request:\n{request_text}\n\n"
+                f"Response:\n{answer}"
+            )
 
             if citations:
                 download_text += "\n\nSources:\n"
                 download_text += "\n".join(f"- {citation}" for citation in citations)
 
+            if follow_up_questions:
+                download_text += "\n\nSuggested Follow-up Questions:\n"
+                download_text += "\n".join(
+                    f"- {follow_up}"
+                    for follow_up in follow_up_questions
+                )
+
             st.download_button(
-                label="Download Answer",
+                label="Download Response",
                 data=download_text,
-                file_name="researchmate_answer.txt",
+                file_name="researchmate_response.txt",
                 mime="text/plain",
                 use_container_width=True
             )
@@ -377,7 +783,7 @@ if st.session_state.documents_processed:
 
                 st.divider()
 
-                with st.expander("🔎 Retrieved Chunks (Debug View)", expanded=True):
+                with st.expander("Retrieved Chunks (Debug View)", expanded=True):
 
                     for i, chunk in enumerate(retrieved_chunks, start=1):
 
@@ -401,17 +807,16 @@ if st.session_state.documents_processed:
                         st.write(chunk["text"])
 
                         st.markdown("---")
-
         except Exception as e:
 
-            st.error("❌ Failed to generate answer.")
+            st.error("Failed to generate research assistance.")
 
             st.exception(e)
 
 else:
 
     st.info(
-        "📄 Upload and process documents before asking questions."
+        "Upload and process documents before using research assistance."
     )
 
 # ==========================================================
@@ -423,3 +828,6 @@ st.divider()
 st.caption(
     "ResearchMate AI • Built using Streamlit, FAISS, Sentence Transformers and Gemini 2.5 Flash"
 )
+
+
+

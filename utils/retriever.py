@@ -6,15 +6,8 @@ Responsible for:
 - Retrieving the most relevant document chunks
 """
 
-from sentence_transformers import SentenceTransformer
-
-from config import EMBEDDING_MODEL, MIN_RELEVANCE_SCORE, TOP_K
-
-# ==========================================================
-# Load Embedding Model (Loaded only once)
-# ==========================================================
-
-model = SentenceTransformer(EMBEDDING_MODEL)
+from config import MIN_RELEVANCE_SCORE, TOP_K
+from utils.embedding_model import get_embedding_model
 
 
 def retrieve(query, vector_store):
@@ -35,6 +28,8 @@ def retrieve(query, vector_store):
 
     if not query.strip():
         return []
+
+    model = get_embedding_model()
 
     query_embedding = model.encode(
         query,

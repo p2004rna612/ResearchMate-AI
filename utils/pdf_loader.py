@@ -9,8 +9,60 @@ Responsible for:
 
 from pathlib import Path
 import pdfplumber
+import pypdfium2 as pdfium
 
 from utils.citation_utils import infer_research_link
+
+
+def _extract_pages_with_pdfium(pdf_path, name):
+    pages = []
+
+    pdf = pdfium.PdfDocument(pdf_path)
+
+    try:
+        for page_index, page in enumerate(pdf, start=1):
+            text_page = page.get_textpage()
+            text = text_page.get_text_range()
+
+            if not text or not text.strip():
+                continue
+
+            pages.append(
+                {
+                    "document": name,
+                    "page": page_index,
+                    "text": text.strip(),
+                    "source_id": f"{Path(name).stem}_page_{page_index}",
+                }
+            )
+    finally:
+        pdf.close()
+
+    return pages
+
+
+def _extract_pages_with_pdfplumber(pdf_path, name):
+    pages = []
+
+    with pdfplumber.open(pdf_path) as pdf:
+
+        for page_number, page in enumerate(pdf.pages, start=1):
+
+            text = page.extract_text()
+
+            if not text or not text.strip():
+                continue
+
+            pages.append(
+                {
+                    "document": name,
+                    "page": page_number,
+                    "text": text.strip(),
+                    "source_id": f"{Path(name).stem}_page_{page_number}",
+                }
+            )
+
+    return pages
 
 
 def load_pdf(pdf_path, document_name=None):
@@ -42,32 +94,13 @@ def load_pdf(pdf_path, document_name=None):
     pdf_path = Path(pdf_path)
 
     pages = []
-
-    with pdfplumber.open(pdf_path) as pdf:
-
-        extracted_pages = []
-
-        for page_number, page in enumerate(pdf.pages, start=1):
-
-            text = page.extract_text()
-
-            # Skip empty pages
-            if not text or not text.strip():
-                continue
-
-            extracted_pages.append(
-                {
-                    "document": document_name if document_name else pdf_path.name,
-                    "page": page_number,
-                    "text": text.strip(),
-                    "source_id": (
-                        f"{Path(document_name).stem if document_name else pdf_path.stem}"
-                        f"_page_{page_number}"
-                    ),
-                }
-            )
-
     name = document_name if document_name else pdf_path.name
+
+    try:
+        extracted_pages = _extract_pages_with_pdfium(pdf_path, name)
+    except Exception:
+        extracted_pages = _extract_pages_with_pdfplumber(pdf_path, name)
+
     link_text = "\n".join(page["text"] for page in extracted_pages[:2])
     research_link = infer_research_link(link_text, name)
 
